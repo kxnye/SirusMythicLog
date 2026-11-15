@@ -80,7 +80,7 @@ local healing = {}
 local aggregate, others, otherIndex
 local ownDamage, ladderDamage, gameDamage = 0, 0, 0
 local blowGame, blowLadder = {}, {}
-local hitDamage, firstHit, targetDied, guardians = 0, nil, nil, {}
+local firstHit, targetDied, guardians = nil, nil, {}
 local cleu0
 local units, unitCount
 local events, eventCount
@@ -255,11 +255,8 @@ Account = function(event, srcGUID, srcFlags, dstGUID, dstFlags, ...)
                 gameDamage = gameDamage + amount - overkill
             end
         end
-        if srcGUID == playerGuid or (guardians[srcGUID] and (srcFlags or 0) % 2 == 1) then
-            hitDamage = hitDamage + amount
-            if npc then
-                ladderDamage = ladderDamage + amount - overkill
-            end
+        if npc and (srcGUID == playerGuid or (guardians[srcGUID] and (srcFlags or 0) % 2 == 1)) then
+            ladderDamage = ladderDamage + amount - overkill
         end
         if overkill > 0 and watched[dstGUID] then
             blowGame[dstGUID], blowLadder[dstGUID] = gameDamage, ladderDamage
@@ -392,7 +389,7 @@ function CombatLog.Begin(player, target, aggregateOthers)
     aggregate, others, otherIndex = aggregateOthers and true or false, {}, {}
     ownDamage, ladderDamage, gameDamage = 0, 0, 0
     blowGame, blowLadder = {}, {}
-    hitDamage, firstHit, targetDied, guardians = 0, nil, nil, {}
+    firstHit, targetDied, guardians = nil, nil, {}
     cleu0 = nil
     units, unitCount = {}, 0
     events, eventCount = {}, 0
@@ -468,5 +465,5 @@ function CombatLog.End()
     end
     return { seen = seen, succCast = succCast, cleu0 = cleu0, ownDamage = ownDamage, ladderDamage = ladderDamage,
         gameDamage = gameDamage, others = #others,
-        hitDamage = hitDamage, firstHit = firstHit, targetDied = targetDied }
+        firstHit = firstHit, targetDied = targetDied }
 end

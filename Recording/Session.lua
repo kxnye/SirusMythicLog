@@ -752,8 +752,8 @@ Stop = function(reason)
         end
     else
         local fightEnd = info.targetDied or session.ms
-        if info.firstHit and info.hitDamage > 0 and fightEnd > info.firstHit then
-            session.dps = floor(info.hitDamage / max(1, floor((fightEnd - info.firstHit) / 1000)))
+        if info.firstHit and info.ownDamage > 0 and fightEnd > info.firstHit then
+            session.dps = floor(info.ownDamage / max(1, floor((fightEnd - info.firstHit) / 1000)))
         end
     end
     local closed = Store.Close("done")
@@ -1251,6 +1251,14 @@ function Session.Recording()
     return { entry = session, ms = Recorder.Now(), bytes = bytes, grace = grace.running }
 end
 
+local function Freed()
+    fullSaid = false
+    if state == IDLE and not Store.Full() then
+        Arm(false)
+    end
+    UpdateUI()
+end
+
 local function Forget(gone)
     if gone[lastSession] then
         lastSession = nil
@@ -1264,8 +1272,12 @@ local function Forget(gone)
     if armed and gone[armed.resume] then
         DropResume()
     end
-    fullSaid = false
-    UpdateUI()
+    Freed()
+end
+
+local function Refused()
+    Print("список не очищен: идёт запись боя.")
+    return false
 end
 
 function Session.Remove(entry)
@@ -1277,16 +1289,15 @@ end
 function Session.Clear(own)
     if own then
         local gone = Store.RemoveOwn()
-        if not gone then return false end
+        if not gone then return Refused() end
         Forget(gone)
         return true
     end
-    if not Store.Reset() then return false end
+    if not Store.Reset() then return Refused() end
     lastSession, resumable, postPending = nil, nil, nil
     if armed and armed.resume then
         DropResume()
     end
-    fullSaid = false
-    UpdateUI()
+    Freed()
     return true
 end

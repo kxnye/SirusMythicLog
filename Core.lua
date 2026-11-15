@@ -1,6 +1,6 @@
 local addonName, ns = ...
 
-ns.VERSION = "1.0.0"
+ns.VERSION = "1.0.1"
 ns.FORMAT = 6
 ns.SCHEMA = 8
 

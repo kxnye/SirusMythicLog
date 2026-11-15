@@ -1085,7 +1085,6 @@ function Recorder.End()
         ownDamage = cleu.ownDamage,
         ladderDamage = cleu.ladderDamage,
         gameDamage = cleu.gameDamage,
-        hitDamage = cleu.hitDamage,
         firstHit = cleu.firstHit,
         targetDied = cleu.targetDied,
         power = class.power,

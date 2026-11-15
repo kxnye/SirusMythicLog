@@ -2,7 +2,7 @@
 ## Title: SirusMythicLog
 ## Notes: logger sirusmythic.ru
 ## Author: sirusmythic.ru
-## Version: 1.0.0
+## Version: 1.0.1
 ## X-Sirus-Update https://github.com/kxnye/SirusMythicLog/tree/main
 ## X-Sirus-Category 7
 ## SavedVariables: SirusMythicLogDB
