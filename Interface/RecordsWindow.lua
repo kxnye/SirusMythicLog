@@ -19,11 +19,9 @@ local LIST_TOP = 34
 local COLUMNS_HEIGHT = 18
 local GRID_TOP = LIST_TOP + COLUMNS_HEIGHT
 local GRID_HEIGHT = ROWS * ROW_HEIGHT
-local OWN_TOP = GRID_TOP + GRID_HEIGHT + 6
-local OWN_HEIGHT = 20
 local CONTROLS_HEIGHT = 22
 local GAP = 6
-local CONTENT = OWN_TOP + OWN_HEIGHT
+local CONTENT = GRID_TOP + GRID_HEIGHT + GAP
 local FOOTER = 78
 local FOOT_ROW = 57
 local BAR_WIDTH = 80
@@ -32,7 +30,6 @@ local SPEC_SIZE = 16
 local SPEC_TIP = "|T%s:16:16:0:0:64:64:5:59:5:59|t"
 local WHITE = "Interface\\Buttons\\WHITE8X8"
 local CLEAR_POPUP = "SIRUSMYTHICLOG_CLEAR"
-local CLEAR_OWN_POPUP = "SIRUSMYTHICLOG_CLEAR_OWN"
 local LOOK = {
     rec = { "Interface\\COMMON\\Indicator-Red", 1, 1, 1, 1, 0.45, 0.45 },
     wait = { "Interface\\COMMON\\Indicator-Yellow", 1, 1, 1, 0.9, 0.9, 0.9 },
@@ -381,20 +378,6 @@ for index = 1, ROWS do
     rows[index] = row
 end
 
-local ownBox = CreateFrame("CheckButton", "SirusMythicLogPanelOwn", panel, "UICheckButtonTemplate")
-ownBox:SetWidth(20)
-ownBox:SetHeight(20)
-ownBox:SetPoint("TOPLEFT", body, "TOPLEFT", PAD - 4, -OWN_TOP)
-local ownLabel = Text(panel, "GameFontHighlightSmall")
-ownLabel:SetPoint("LEFT", ownBox, "RIGHT", 0, 1)
-ownLabel:SetText("Только этот персонаж")
-ownBox:SetHitRectInsets(0, -ownLabel:GetStringWidth(), 0, 0)
-ownBox:SetScript("OnClick", function(self)
-    Store.SetOwnOnly(self:GetChecked() and true or false)
-    offset = 0
-    Refresh()
-end)
-
 local footLine = Line(panel)
 footLine:SetPoint("BOTTOMLEFT", 5, FOOTER - 1)
 footLine:SetPoint("BOTTOMRIGHT", -5, FOOTER - 1)
@@ -418,9 +401,8 @@ clear:SetHeight(CONTROLS_HEIGHT)
 clear:SetPoint("RIGHT", panel, "BOTTOMRIGHT", -(PAD - 2), FOOT_ROW)
 clear:SetText("Очистить всё")
 clear:SetScript("OnClick", function()
-    local own = Store.OwnOnly()
-    if #Store.Fights(own) > 0 then
-        StaticPopup_Show(own and CLEAR_OWN_POPUP or CLEAR_POPUP)
+    if #Store.Fights() > 0 then
+        StaticPopup_Show(CLEAR_POPUP)
     end
 end)
 
@@ -511,11 +493,10 @@ end
 function Refresh()
     if not panel:IsShown() then return end
     local rec = Session.Recording()
-    local own = Store.OwnOnly()
-    local list = Store.Fights(own)
+    local list = Store.Fights()
     total = #list
     UpdateStatus(rec)
-    UpdateControls(rec, own, total)
+    UpdateControls(rec, total)
     offset = max(0, min(offset, total - ROWS))
     Layout(total)
     for index = 1, ROWS do
@@ -562,7 +543,7 @@ function Refresh()
     Panel.Tick()
 end
 
-function UpdateControls(rec, own, count)
+function UpdateControls(rec, count)
     manualButton:SetText(rec and "Остановить запись" or "Начать запись")
     if rec or not Store.Full() then
         manualButton:Enable()
@@ -573,7 +554,6 @@ function UpdateControls(rec, own, count)
     for _, box in ipairs(boxes) do
         box:SetChecked(enabled and Session.Setting(box.key))
     end
-    ownBox:SetChecked(own)
     if rec or count == 0 then
         clear:Disable()
     else
@@ -587,18 +567,6 @@ StaticPopupDialogs[CLEAR_POPUP] = {
     button2 = NO,
     OnAccept = function()
         Session.Clear()
-    end,
-    timeout = 0,
-    whileDead = 1,
-    hideOnEscape = 1,
-}
-
-StaticPopupDialogs[CLEAR_OWN_POPUP] = {
-    text = "Удалить записи этого персонажа?",
-    button1 = YES,
-    button2 = NO,
-    OnAccept = function()
-        Session.Clear(true)
     end,
     timeout = 0,
     whileDead = 1,

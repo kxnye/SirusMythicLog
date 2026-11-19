@@ -4,7 +4,7 @@ local Recorder = {}
 ns.Recorder = Recorder
 
 local D = ns.Data
-local Store, Target, Boss = ns.Store, ns.Target, ns.Boss
+local Store, Target, Boss, Cache = ns.Store, ns.Target, ns.Boss, ns.Cache
 local Escape, NumberText, KV = ns.Escape, ns.NumberText, ns.KV
 
 local Write = Store.Write
@@ -828,6 +828,7 @@ end
 local function OnAura(unit)
     local t = Now()
     if unit == "player" then
+        Cache.Changed()
         auraP = auraP + 1
         ScanAuras(playerAuras, t)
         SampleStats(t)
@@ -838,6 +839,7 @@ local function OnAura(unit)
 end
 
 local function OnStats()
+    Cache.Changed()
     SampleStats(Now())
 end
 

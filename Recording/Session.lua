@@ -26,6 +26,7 @@ local ENGAGE_STEP = 1
 local MANUAL_IDLE = 600
 local RESUME_WINDOW = 3600
 local MOD_WAIT = 15
+local SNAP_QUIET = 2
 
 local state = IDLE
 local db
@@ -45,11 +46,13 @@ local encounterEvents = 0
 local encounterRegistered = false
 local hookedClear = false
 local auraWatching = false
+local settling = false
 local modWatch
 local timeStep
 local logOurs, logSeenOn, logOptOut = false, nil, false
 local Stop
 local engageCheck
+local Guard
 
 local frame = CreateFrame("Frame")
 
@@ -141,7 +144,38 @@ local function LastActivityT()
     return Recorder.Now()
 end
 
+local function RefreshArmed()
+    if state ~= ARMED or not armed or armed.resume or InCombat() then return end
+    if Cache.Take() then
+        armed.snap = Cache.Copy()
+    end
+end
+
+local settle = ns.NewTimer(function()
+    Guard("settle", RefreshArmed)
+end)
+
+local function Unsettled()
+    settle.Start(SNAP_QUIET)
+end
+
+local function WatchSheet()
+    local want = state == ARMED and armed ~= nil and not armed.resume and not InCombat()
+    if want == settling then return end
+    settling = want
+    if want then
+        Cache.OnChange(Unsettled)
+        if Cache.Stale() then
+            Unsettled()
+        end
+    else
+        Cache.OnChange(nil)
+        settle.Stop()
+    end
+end
+
 local function SetAuraWatch()
+    WatchSheet()
     local want = (state == ARMED and not InCombat()) or modWatch ~= nil
     if want == auraWatching then return end
     auraWatching = want
@@ -285,7 +319,39 @@ local function ClientProbes(out, measure)
     out[#out + 1] = ProbeLine("timer.native", grace.native and 1 or 0)
 end
 
+local function MakeRoom()
+    local keep = {}
+    if resumable then
+        keep[resumable] = true
+    end
+    if postPending then
+        keep[postPending] = true
+    end
+    if armed and armed.resume then
+        keep[armed.resume] = true
+    end
+    local gone = Store.Evict(keep)
+    if not gone then return end
+    local ids = {}
+    for _, fight in ipairs(gone) do
+        for _, entry in ipairs(fight.entries) do
+            if entry == lastSession then
+                lastSession = nil
+            end
+        end
+        ids[#ids + 1] = fight.first.id
+    end
+    table.sort(ids)
+    if #ids == 1 then
+        Print(format("место для логов: удалён самый старый бой %d.", ids[1]))
+    elseif #ids > 1 then
+        Print(format("место для логов: удалены самые старые бои %s.", table.concat(ids, ", ")))
+    end
+    UpdateUI()
+end
+
 local function RoomForRecording()
+    MakeRoom()
     if not Store.Full() then return true end
     if not fullSaid then
         fullSaid = true
@@ -937,7 +1003,7 @@ CheckEncounter = function()
     end
 end
 
-local function Guard(where, fn, ...)
+function Guard(where, fn, ...)
     local ok, err = pcall(fn, ...)
     if ok then return end
     if Recorder.Active() then
@@ -966,7 +1032,6 @@ function frame:ADDON_LOADED(name)
 end
 
 function frame:PLAYER_LOGIN()
-    RoomForRecording()
     hookedClear = pcall(hooksecurefunc, "CombatLogClearEntries", Recorder.OnClear)
     lastForm = GetShapeshiftForm()
     local open = Store.LastOpen()
@@ -1111,7 +1176,6 @@ end
 
 function frame:UNIT_AURA(unit)
     if unit ~= "player" then return end
-    Cache.MarkDynamic()
     CheckModifier()
 end
 
@@ -1286,13 +1350,7 @@ function Session.Remove(entry)
     return true
 end
 
-function Session.Clear(own)
-    if own then
-        local gone = Store.RemoveOwn()
-        if not gone then return Refused() end
-        Forget(gone)
-        return true
-    end
+function Session.Clear()
     if not Store.Reset() then return Refused() end
     lastSession, resumable, postPending = nil, nil, nil
     if armed and armed.resume then

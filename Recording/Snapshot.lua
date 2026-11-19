@@ -15,6 +15,7 @@ local NATIVE = 1
 local FACTIONS = { 932, 934 }
 
 local auras, full
+local changedAt = 0
 
 local function Clean(value)
     if value == nil then return "" end
@@ -85,7 +86,8 @@ end
 local function WriteIdentity(w)
     local client, build = GetBuildInfo()
     w:Line("SNAPSHOT", "addon", addonName, "version", ns.VERSION, "format", ns.FORMAT,
-        "time", date("%Y-%m-%d %H:%M:%S"), "client", client, "clientBuild", build, "realm", GetRealmName())
+        "time", date("%Y-%m-%d %H:%M:%S"), "client", client, "clientBuild", build, "realm", GetRealmName(),
+        "calm", changedAt > 0 and ns.MsSince(changedAt) or nil)
 
     local guid, guidHex = ParseGuid(UnitGUID("player"))
     local race, raceToken, raceId = UnitRace("player")
@@ -763,6 +765,63 @@ local CACHE_FRESH = 60
 local snap = {}
 local staticDirty, dynDirty, bookDirty = true, true, true
 local book
+local onChange
+
+local SHEET_UNIT = {
+    "UNIT_AURA", "UNIT_STATS", "UNIT_ATTACK_POWER", "UNIT_RANGED_ATTACK_POWER", "UNIT_ATTACK_SPEED", "UNIT_RANGEDDAMAGE",
+    "UNIT_MAXMANA",
+}
+local SHEET_PLAYER = { COMBAT_RATING_UPDATE = true, PLAYER_DAMAGE_DONE_MODS = true }
+
+function Cache.Changed()
+    changedAt = GetTime()
+    dynDirty = true
+    if onChange then
+        onChange()
+    end
+end
+
+function Cache.OnChange(fn)
+    onChange = fn
+end
+
+local sheet = CreateFrame("Frame")
+local sheetOn = false
+
+local function SheetListen(on)
+    if on == sheetOn then return end
+    sheetOn = on
+    for _, event in ipairs(SHEET_UNIT) do
+        if on then
+            ns.RegisterUnit(sheet, event, "player")
+        else
+            sheet:UnregisterEvent(event)
+        end
+    end
+    for event in pairs(SHEET_PLAYER) do
+        if on then
+            sheet:RegisterEvent(event)
+        else
+            sheet:UnregisterEvent(event)
+        end
+    end
+end
+
+sheet:SetScript("OnEvent", function(_, event, unit)
+    if event == "PLAYER_REGEN_DISABLED" then
+        SheetListen(false)
+    elseif event == "PLAYER_REGEN_ENABLED" or event == "PLAYER_ENTERING_WORLD" then
+        SheetListen(not ns.InCombat())
+        if not ns.Recorder.Active() then
+            Cache.Changed()
+        end
+    elseif unit == "player" or SHEET_PLAYER[event] then
+        Cache.Changed()
+    end
+end)
+sheet:RegisterEvent("PLAYER_ENTERING_WORLD")
+sheet:RegisterEvent("PLAYER_REGEN_DISABLED")
+sheet:RegisterEvent("PLAYER_REGEN_ENABLED")
 
 local function AuraSignature()
     local ids = {}
@@ -853,7 +912,13 @@ function Cache.Write(parts, guid)
 end
 
 function Cache.After(closed)
-    local dyn = Snapshot.Build(false)
+    local dyn
+    if staticDirty or not snap.book then
+        dyn, snap.gear, snap.book = Snapshot.Build(true)
+        staticDirty = false
+    else
+        dyn = Snapshot.Build(false)
+    end
     Store.Append(closed, dyn)
     snap.dyn, snap.at, snap.sig = dyn, GetTime(), AuraSignature()
     dynDirty = false
@@ -1099,14 +1164,16 @@ end
 local function Boosts()
     local info = C_PlayerInfo
     if not info then return nil end
+    local count = info.GetNumBonusStats() or 0
+    if count <= 0 then return nil end
     local parts = {}
-    for i = 1, info.GetNumBonusStats() or 0 do
+    for i = 1, count do
         local _, points = info.GetBonusStatInfo(i)
         if points and points ~= 0 then
             parts[#parts + 1] = i .. ":" .. NumberText(points)
         end
     end
-    return List(parts)
+    return List(parts) or "0"
 end
 
 local function ModifierValues()
