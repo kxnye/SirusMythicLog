@@ -22,8 +22,8 @@ local GRID_HEIGHT = ROWS * ROW_HEIGHT
 local CONTROLS_HEIGHT = 22
 local GAP = 6
 local CONTENT = GRID_TOP + GRID_HEIGHT + GAP
-local FOOTER = 78
-local FOOT_ROW = 57
+local FOOTER = 40
+local FOOT_ROW = 20
 local BAR_WIDTH = 80
 local ID_RIGHT, NAME_X, TIME_RIGHT, DPS_RIGHT, SPEC_X = 120, 128, 330, 396, 404
 local SPEC_SIZE = 16
@@ -406,16 +406,6 @@ clear:SetScript("OnClick", function()
     end
 end)
 
-local fileTitle = Text(panel, "GameFontDisableSmall")
-fileTitle:SetPoint("BOTTOMLEFT", PAD, 26)
-fileTitle:SetHeight(12)
-fileTitle:SetText("Файл лога - после /reload:")
-
-local filePath = Text(panel, "GameFontDisableSmall")
-filePath:SetPoint("BOTTOMLEFT", PAD, 12)
-filePath:SetHeight(12)
-filePath:SetText("WTF\\Account\\<аккаунт>\\SavedVariables\\SirusMythicLog.lua")
-
 local function Head(rec)
     if rec then
         local entry = rec.entry
@@ -434,7 +424,7 @@ end
 local function Usage()
     local bytes = Store.DbBytes()
     local share = min(bytes / Store.DB_CAP, 1)
-    used:SetText(format("Занято %s из %s", ns.Size(bytes), ns.Size(Store.DB_CAP)))
+    used:SetText(format("Память %s из %s", ns.Size(bytes), ns.Size(Store.DB_CAP)))
     local width = floor(BAR_WIDTH * share + 0.5)
     fill:SetWidth(max(width, 1))
     ShowIf(fill, width >= 1)

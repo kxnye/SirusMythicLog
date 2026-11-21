@@ -4,7 +4,7 @@ local Session = {}
 ns.Session = Session
 
 local Store, Recorder, Target, Instance, Boss, Journal = ns.Store, ns.Recorder, ns.Target, ns.Instance, ns.Boss, ns.Journal
-local Cache, Modifier = ns.Cache, ns.Modifier
+local Cache, Modifier, Jobs = ns.Cache, ns.Modifier, ns.Jobs
 local KV, ProbeLine, Print, InCombat, MsSince = ns.KV, ns.ProbeLine, ns.Print, ns.InCombat, ns.MsSince
 
 local format, floor, max = string.format, math.floor, math.max
@@ -27,6 +27,9 @@ local MANUAL_IDLE = 600
 local RESUME_WINDOW = 3600
 local MOD_WAIT = 15
 local SNAP_QUIET = 2
+local TIME_SLICE = 2
+local TIME_TRIES = 48
+local TIME_FRAME = 0.01
 
 local state = IDLE
 local db
@@ -48,7 +51,8 @@ local hookedClear = false
 local auraWatching = false
 local settling = false
 local modWatch
-local timeStep
+local timeStep, timeTimer
+local timeTries = 0
 local logOurs, logSeenOn, logOptOut = false, nil, false
 local Stop
 local engageCheck
@@ -280,21 +284,29 @@ local function ReleaseClientLog()
     end
 end
 
-local function MeasureTimeStep()
+local function TimeSlice()
     local start = debugprofilestop()
     local last = GetTime()
-    local changes, step = 0, 0
-    while debugprofilestop() - start < 20 do
+    while debugprofilestop() - start < TIME_SLICE do
         local now = GetTime()
         if now ~= last then
-            changes = changes + 1
-            step = floor((now - last) * 1000 + 0.5)
-            last = now
-            if changes >= 2 then break end
+            return floor((now - last) * 1000 + 0.5)
         end
     end
-    return step
+    timeTries = timeTries + 1
+    if timeTries >= TIME_TRIES then return 0 end
+    return nil
 end
+
+timeTimer = ns.NewTimer(function()
+    if timeStep ~= nil or state == REC or InCombat() then return end
+    timeStep = TimeSlice()
+    if timeStep == nil then
+        timeTimer.Start(TIME_FRAME)
+    elseif armed and armed.lines then
+        armed.lines[#armed.lines + 1] = ProbeLine("gt.step", timeStep)
+    end
+end)
 
 local function StaticProbes(out)
     out[#out + 1] = ProbeLine("api.RegisterUnitEvent", type(frame.RegisterUnitEvent))
@@ -306,9 +318,12 @@ local function StaticProbes(out)
     ns.CleanStats.Probes(out)
 end
 
-local function ClientProbes(out, measure)
-    if timeStep == nil and measure then
-        timeStep = MeasureTimeStep()
+local function ClientProbes(out)
+    if timeStep == nil and not InCombat() and not timeTimer.running then
+        timeStep = TimeSlice()
+        if timeStep == nil then
+            timeTimer.Start(TIME_FRAME)
+        end
     end
     if timeStep ~= nil then
         out[#out + 1] = ProbeLine("gt.step", timeStep)
@@ -319,7 +334,7 @@ local function ClientProbes(out, measure)
     out[#out + 1] = ProbeLine("timer.native", grace.native and 1 or 0)
 end
 
-local function MakeRoom()
+local function Keep()
     local keep = {}
     if resumable then
         keep[resumable] = true
@@ -330,8 +345,10 @@ local function MakeRoom()
     if armed and armed.resume then
         keep[armed.resume] = true
     end
-    local gone = Store.Evict(keep)
-    if not gone then return end
+    return keep
+end
+
+local function Evicted(gone)
     local ids = {}
     for _, fight in ipairs(gone) do
         for _, entry in ipairs(fight.entries) do
@@ -350,9 +367,11 @@ local function MakeRoom()
     UpdateUI()
 end
 
+Store.Hooks(Keep, Evicted)
+
 local function RoomForRecording()
-    MakeRoom()
-    if not Store.Full() then return true end
+    Store.Evict()
+    if Store.Room() then return true end
     if not fullSaid then
         fullSaid = true
         Print("место для логов закончилось, новые бои не записываются. Отправьте файл на upload.sirusmythic.ru и нажмите «Очистить всё» в /sml")
@@ -393,7 +412,7 @@ local function BuildArm(info, mode, fresh, rearm)
     end
     out[#out + 1] = Target.Line(info, where)
     StaticProbes(out)
-    ClientProbes(out, not rearm)
+    ClientProbes(out)
     local logOn, logAuto
     if rearm then
         logOn = ClientLogOn()
@@ -520,7 +539,7 @@ end
 
 local function Begin(trigger, mode, bosses)
     if state == REC or not RoomForRecording() then return false end
-    local cpu0 = debugprofilestop()
+    local cpu0, jobs0 = debugprofilestop(), Jobs.spent
     local inCombat = InCombat()
     local info = Target.Info()
     local player = UnitGUID("player") or ""
@@ -548,7 +567,7 @@ local function Begin(trigger, mode, bosses)
             out[1] = Target.DummyLine("start")
         end
         out[#out + 1] = Target.Line(info, "start")
-        ClientProbes(out, not inCombat)
+        ClientProbes(out)
         local logOn, logAuto = ArmClientLog(false, out)
         local stale, dyn = Cache.State()
         pre = { lines = out, logOn = logOn, logAuto = logAuto, stale = stale, dyn = dyn, snap = Cache.Copy() }
@@ -631,6 +650,7 @@ local function Begin(trigger, mode, bosses)
     UpdateListen()
     encounterEvents = 0
     CancelLater()
+    timeTimer.Stop()
     grace.Stop()
     CancelModifierWatch()
     SetAuraWatch()
@@ -639,9 +659,9 @@ local function Begin(trigger, mode, bosses)
     for _, subject in ipairs(subjects) do
         MarkSeen(subject)
     end
-    session.t0 = Recorder.Begin(mode, subjects)
+    session.t0 = Recorder.Begin(mode, subjects, pre.snap and pre.snap.links)
     ns.CombatLog.Members(encounterEntries)
-    Recorder.AddCpu("begin", debugprofilestop() - cpu0)
+    Recorder.AddCpu("begin", debugprofilestop() - cpu0 - (Jobs.spent - jobs0))
     if trigger ~= "resume" then
         local how = manual and ", запись запущена вручную" or ""
         if session.boss then

@@ -8,12 +8,14 @@ local Store, Recorder = ns.Store, ns.Recorder
 local Escape = ns.Escape
 
 local Write, Run, Now, Ms = Store.Write, Recorder.Run, Recorder.Now, Recorder.Ms
-local format, floor, abs = string.format, math.floor, math.abs
+local format, match, floor, abs = string.format, string.match, math.floor, math.abs
 local UnitPower, UnitPowerMax, GetComboPoints = UnitPower, UnitPowerMax, GetComboPoints
+local GetInventoryItemLink = GetInventoryItemLink
 
 local PLAYER, PET = "", "e"
 local ENCHANT_JITTER = 1000
 local RUNES = 6
+local GEAR_SLOTS = 19
 
 local FIELDS = Recorder.FIELDS
 FIELDS[#FIELDS + 1] = { "Q", "t,u,k,v,mx" }
@@ -21,6 +23,7 @@ FIELDS[#FIELDS + 1] = { "U", "t,r,k,sr,d" }
 FIELDS[#FIELDS + 1] = { "TM", "t,slot,name,sr,d" }
 FIELDS[#FIELDS + 1] = { "WE", "t,slot,er,ch,name" }
 FIELDS[#FIELDS + 1] = { "Z", "t,k,v" }
+FIELDS[#FIELDS + 1] = { "EQ", "t,slot,item" }
 
 local frame = CreateFrame("Frame")
 local class
@@ -31,6 +34,7 @@ local runeKind, runeStart, runeT, runeIndex = {}, {}, {}, {}
 local totemName, totemStart = {}, {}
 local enchantEnd, enchantCharges = {}, {}
 local toggles = {}
+local gear = {}
 
 local function PowerLine(t, u, code, v, mx)
     if mx then
@@ -222,8 +226,25 @@ local function WriteEnchants(t)
     WriteEnchant(t, D.WEAPON_SLOTS[2], off, offLeft, offCharges)
 end
 
+local function WriteGear(t)
+    for slot = 1, GEAR_SLOTS do
+        local link = GetInventoryItemLink("player", slot)
+        if link ~= gear[slot] then
+            gear[slot] = link
+            local item = link and match(link, "item:([^|]+)")
+            if item then
+                Write(format("EQ;%d;%d;%s", t, slot, item))
+            else
+                Write(format("EQ;%d;%d", t, slot))
+            end
+        end
+    end
+end
+
 local function OnInventory()
-    WriteEnchants(Now())
+    local t = Now()
+    WriteGear(t)
+    WriteEnchants(t)
 end
 
 local function Toggle(t, key, on)
@@ -286,7 +307,7 @@ frame:SetScript("OnEvent", function(self, event, unit, ...)
     Run(handler, event, event, unit, ...)
 end)
 
-function ClassState.Begin(t)
+function ClassState.Begin(t, links)
     local _
     _, class = UnitClass("player")
     lastUnit = nil
@@ -297,6 +318,14 @@ function ClassState.Begin(t)
     totemName, totemStart = {}, {}
     enchantEnd, enchantCharges = {}, {}
     toggles = {}
+    gear = {}
+    for slot = 1, GEAR_SLOTS do
+        if links then
+            gear[slot] = links[slot]
+        else
+            gear[slot] = GetInventoryItemLink("player", slot)
+        end
+    end
 
     local kind = UnitPowerType("player")
     Power(t, PLAYER, "y", kind)
@@ -314,6 +343,7 @@ function ClassState.Begin(t)
         frame:RegisterEvent("BAG_UPDATE")
     end
     WriteTotems(t)
+    WriteGear(t)
     WriteEnchants(t)
     local attack = GetSpellInfo(D.ATTACK_SPELL)
     Toggle(t, "aa", attack and IsCurrentSpell(attack))

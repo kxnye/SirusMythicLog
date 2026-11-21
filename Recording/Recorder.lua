@@ -4,7 +4,7 @@ local Recorder = {}
 ns.Recorder = Recorder
 
 local D = ns.Data
-local Store, Target, Boss, Cache = ns.Store, ns.Target, ns.Boss, ns.Cache
+local Store, Target, Boss, Cache, Jobs = ns.Store, ns.Target, ns.Boss, ns.Cache, ns.Jobs
 local Escape, NumberText, KV = ns.Escape, ns.NumberText, ns.KV
 
 local Write = Store.Write
@@ -55,9 +55,10 @@ local function AddCpu(where, spent)
 end
 
 local function Run(handler, where, ...)
+    local inner = Jobs.spent
     local start = debugprofilestop()
     local ok, err = pcall(handler, ...)
-    AddCpu(where, debugprofilestop() - start)
+    AddCpu(where, debugprofilestop() - start - (Jobs.spent - inner))
     if not ok then
         Fail(where, err)
     end
@@ -971,7 +972,7 @@ function Recorder.AddCpu(where, spent)
     end
 end
 
-function Recorder.Begin(mode, list)
+function Recorder.Begin(mode, list, links)
     playerGUID = UnitGUID("player")
     t0 = GetTime()
     t0ms = floor(t0 * 1000 + 0.5)
@@ -999,7 +1000,7 @@ function Recorder.Begin(mode, list)
     Try("begin", ScanAuras, targetAuras, t)
     Try("begin", SampleStats, t)
     Try("begin", OnCooldown)
-    Try("begin", ns.ClassState.Begin, t)
+    Try("begin", ns.ClassState.Begin, t, links)
     Try("begin", ns.Pet.Begin, t)
     for _, event in ipairs(CAST_EVENTS) do
         RegisterUnit(event, "player")

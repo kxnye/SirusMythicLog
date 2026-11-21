@@ -14,7 +14,7 @@ local concat, tinsert = table.concat, table.insert
 local NATIVE = 1
 local FACTIONS = { 932, 934 }
 
-local auras, full
+local auras, full, gearLinks
 local changedAt = 0
 
 local function Clean(value)
@@ -522,6 +522,7 @@ local function WriteGear(w)
             equipped = equipped + 1
         end
     end
+    gearLinks = links
     w:Line("GEAR", "items", equipped)
     if links[0] then
         WriteAmmo(w, links[0])
@@ -888,6 +889,7 @@ function Cache.Take()
     else
         return snap
     end
+    snap.links = gearLinks
     snap.at = GetTime()
     snap.sig = sig
     dynDirty = false
@@ -896,7 +898,7 @@ end
 
 function Cache.Copy()
     if not snap.dyn then return nil end
-    return { dyn = snap.dyn, gear = snap.gear, book = snap.book, at = snap.at }
+    return { dyn = snap.dyn, gear = snap.gear, book = snap.book, at = snap.at, links = snap.links }
 end
 
 function Cache.Write(parts, guid)
@@ -920,7 +922,7 @@ function Cache.After(closed)
         dyn = Snapshot.Build(false)
     end
     Store.Append(closed, dyn)
-    snap.dyn, snap.at, snap.sig = dyn, GetTime(), AuraSignature()
+    snap.dyn, snap.links, snap.at, snap.sig = dyn, gearLinks, GetTime(), AuraSignature()
     dynDirty = false
 end
 
@@ -1024,6 +1026,10 @@ local ENCHANT_TIME = ns.ENCHANT_TIME
 
 local QUIET = 2
 local SETTLE = 15
+local DEAD_QUIET = 2
+local DEAD_CAP = 15
+local DEAD_RETRY = 2
+local NEXT_FRAME = 0.01
 local MAIN, OFF = D.WEAPON_SLOTS[1], D.WEAPON_SLOTS[2]
 local CLOSE = byte(")")
 local BUSY = { rec = true, armed = true }
@@ -1146,7 +1152,7 @@ local function Known(scan, list)
 end
 
 local function AuraTokens(scan, zodiac)
-    local mine, none = {}, {}
+    local mine, none, other = {}, {}, {}
     for _, aura in ipairs(scan) do
         local token = tostring(aura.spellId)
         if aura.count ~= 0 then
@@ -1155,10 +1161,10 @@ local function AuraTokens(scan, zodiac)
         if zodiac and aura.rank == zodiac then
             token = token .. "z"
         end
-        local list = aura.caster and mine or none
+        local list = not aura.caster and none or aura.caster == "player" and mine or other
         list[#list + 1] = token
     end
-    return List(mine), List(none)
+    return List(mine), List(none), List(other)
 end
 
 local function Boosts()
@@ -1226,25 +1232,32 @@ local function SpecRef(guid)
         "minor", Text(minor)))
 end
 
-local function Body(scan, guid)
+local function Body(scan, guid, dead)
     local category, categorySpell = Known(scan, D.CATEGORY)
     local vip, vipSpell = Known(scan, D.VIP_LEVEL)
     local zodiac, zodiacSpell = Known(scan, D.ZODIAC)
-    local mine, none = AuraTokens(scan, zodiac)
+    local mine, none, other = AuraTokens(scan, zodiac)
     local ratings, bonuses = Ratings()
     local mana = UnitPowerMax("player", 0)
     local out = {}
     Put(out, "lv", UnitLevel("player"))
-    Put(out, "s", SpecRef(guid))
+    if not dead then
+        Put(out, "s", SpecRef(guid))
+    end
     Put(out, "cat", category and Join(category.rank, category.plus, categorySpell))
     Put(out, "vip", vip and Join(vip, vipSpell))
     Put(out, "zod", zodiac and (zodiacSpell .. "," .. zodiac))
     Put(out, "ups", Boosts())
-    Put(out, "mod", ModifierValues())
+    if not dead then
+        Put(out, "mod", ModifierValues())
+    end
     Put(out, "form", Form())
     Put(out, "pa", mine)
     Put(out, "na", none)
-    Put(out, "ammo", Ammo())
+    Put(out, "oa", other)
+    if not dead then
+        Put(out, "ammo", Ammo())
+    end
     for stat, key in ipairs(D.STAT_KEY) do
         Put(out, key, Join(UnitStat("player", stat)))
     end
@@ -1366,6 +1379,68 @@ timer = ns.NewTimer(function()
     Run("clean", Take)
 end)
 
+local Jobs = ns.Jobs
+local deadAt, deadTaken, deadTries, deadGen = nil, false, 0, 0
+local deadTimer
+
+local function ScanFilter(scan, filter)
+    for i = 1, D.AURA_SCAN do
+        local name, rank, _, count, _, _, _, caster, _, _, spellId = UnitAura("player", i, filter)
+        if not name then return end
+        scan[#scan + 1] = { spellId = spellId or 0, rank = rank, count = count or 0, caster = caster }
+    end
+end
+
+local function DeadGone(gen)
+    return gen ~= deadGen or not ns.Recorder.Active() or not UnitIsDeadOrGhost("player")
+end
+
+local DeadWait
+
+local function DeadTake(gen, from)
+    local t = ns.Recorder.Now()
+    local calm = changedAt > 0 and ns.MsSince(changedAt) or nil
+    local scan = {}
+    ScanFilter(scan, "HELPFUL")
+    for step = 1, 2 do
+        Jobs.Yield()
+        if DeadGone(gen) then return end
+        if changedAt ~= from and deadTries < DEAD_RETRY then
+            deadTries = deadTries + 1
+            return DeadWait(gen)
+        end
+        if step == 1 then
+            ScanFilter(scan, "HARMFUL")
+        end
+    end
+    local body = Body(scan, UnitGUID("player"), true)
+    Store.Write(KV("DEAD", "t", t, "calm", calm, "ghost", UnitIsGhost("player") and 1 or nil) .. body)
+    deadAt = nil
+end
+
+DeadWait = function(gen)
+    if DeadGone(gen) then
+        if gen == deadGen then
+            deadAt = nil
+        end
+        return
+    end
+    local now = GetTime()
+    local wait = min(DEAD_QUIET - (now - changedAt), deadAt + DEAD_CAP - now)
+    if wait > NEXT_FRAME then
+        deadTimer.Start(wait)
+        return
+    end
+    local from = changedAt
+    Jobs.Add("dead", function()
+        DeadTake(gen, from)
+    end, true)
+end
+
+deadTimer = ns.NewTimer(function()
+    Run("dead", DeadWait, deadGen)
+end)
+
 local function Touch(wait)
     if InCombat() then return end
     local now = GetTime()
@@ -1465,6 +1540,23 @@ function frame:SPELLS_CHANGED()
     bookStale = true
 end
 
+function frame:PLAYER_DEAD()
+    if deadTaken or not ns.Recorder.Active() then return end
+    deadTaken = true
+    deadGen = deadGen + 1
+    deadAt, deadTries = GetTime(), 0
+    deadTimer.Start(DEAD_QUIET)
+end
+
+function frame:PLAYER_ALIVE()
+    if UnitIsDeadOrGhost("player") then return end
+    deadTaken, deadAt = false, nil
+    deadGen = deadGen + 1
+    deadTimer.Stop()
+end
+
+frame.PLAYER_UNGHOST = frame.PLAYER_ALIVE
+
 frame.SKILL_LINES_CHANGED = frame.SPELLS_CHANGED
 
 frame:SetScript("OnEvent", function(self, event, ...)
@@ -1478,6 +1570,9 @@ end)
 frame:RegisterEvent("PLAYER_ENTERING_WORLD")
 frame:RegisterEvent("PLAYER_REGEN_DISABLED")
 frame:RegisterEvent("PLAYER_REGEN_ENABLED")
+frame:RegisterEvent("PLAYER_DEAD")
+frame:RegisterEvent("PLAYER_ALIVE")
+frame:RegisterEvent("PLAYER_UNGHOST")
 if frame.RegisterCustomEvent then
     pcall(frame.RegisterCustomEvent, frame, "PLAYER_TALENT_UPDATE_EX")
     pcall(frame.RegisterCustomEvent, frame, "PLAYER_TALENT_ACTIVE_GROUP_CHANGED")

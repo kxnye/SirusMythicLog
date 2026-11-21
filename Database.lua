@@ -4,6 +4,7 @@ local Store = {}
 ns.Store = Store
 
 local D = ns.Data
+local Jobs = ns.Jobs
 
 local concat = table.concat
 local floor, min = math.floor, math.min
@@ -15,21 +16,26 @@ local CHUNK_BYTES = 8192
 local MODS_CAP = 64
 local ERRORS_CAP = 20
 local CLEAN_CAP = 20
-local SESSION_WARN = 1048576
-local SESSION_CAP = 1572864
+local SPARE = 1048576
+local WARM_CHUNKS = 64
 
-Store.DB_CAP = 10485760
-Store.RESERVE = SESSION_CAP + 262144
+Store.DB_CAP = 31457280
+Store.FIGHT_CAP = 8388608
+Store.RESERVE = 262144
 
 local db
 local cur, chunks
 local buf = {}
 local bufN, bufBytes = 0, 0
 local records, bytes, dropped = 0, 0, 0
-local capped, warned = false, false
+local capped = false
 local dbBytes = 0
 local fights
+local keepOf, onEvict
+local shedJob, shedDone
 local whoOf = setmetatable({}, { __mode = "k" })
+local sizeOf = setmetatable({}, { __mode = "k" })
+local refsOf = setmetatable({}, { __mode = "k" })
 
 local function DropFights()
     fights = nil
@@ -41,6 +47,46 @@ local function Measure(session)
         total = total + #chunk + 1
     end
     return total
+end
+
+local function Size(session)
+    local size = sizeOf[session]
+    if not size then
+        size = Measure(session)
+        sizeOf[session] = size
+    end
+    return size
+end
+
+local function CleanRefs(line, used)
+    for id in line:gmatch(";[gbs]=(%d+)") do
+        used[tonumber(id)] = true
+    end
+end
+
+local function ChunkRefs(chunk, used)
+    local at = 1
+    while true do
+        local _, last = find(chunk, "STATIC;id=", at, true)
+        if not last then return end
+        local id = tonumber(match(chunk, "^%d+", last + 1))
+        if id then
+            used[id] = true
+        end
+        at = last + 1
+    end
+end
+
+local function Refs(session)
+    local refs = refsOf[session]
+    if not refs then
+        refs = {}
+        for _, chunk in ipairs(session.chunks) do
+            ChunkRefs(chunk, refs)
+        end
+        refsOf[session] = refs
+    end
+    return refs
 end
 
 local function Recount()
@@ -81,6 +127,7 @@ function Store.Init(saved)
         saved.autoLog = false
     end
     saved.v = DB_VERSION
+    saved.cap = Store.DB_CAP
     if saved.enabled == nil then
         saved.enabled = true
     end
@@ -115,6 +162,9 @@ function Store.Init(saved)
     DropFights()
     RestartNumbering()
     Recount()
+    if #db.sessions > 0 then
+        Jobs.Add("warm", Store.Warm)
+    end
     return db
 end
 
@@ -146,12 +196,16 @@ function Store.Owns(entry, realm, guid)
     return guid ~= nil and entry.player == guid and (entry.realm == nil or entry.realm == realm)
 end
 
-function Store.Full()
-    return Store.DbBytes() >= Store.DB_CAP
+local function Fits(total, spare)
+    return total + Store.RESERVE + spare <= Store.DB_CAP
 end
 
 function Store.Room()
-    return Store.DbBytes() + Store.RESERVE <= Store.DB_CAP
+    return Fits(Store.DbBytes(), 0)
+end
+
+function Store.Hooks(keep, evicted)
+    keepOf, onEvict = keep, evicted
 end
 
 function Store.NextId()
@@ -184,6 +238,8 @@ local function Push(line)
     return records
 end
 
+local Shed, Cap
+
 function Store.Write(line)
     if not cur or not line then return nil end
     if capped then
@@ -191,15 +247,19 @@ function Store.Write(line)
         return nil
     end
     local index = Push(line)
-    if bytes >= SESSION_WARN and not warned then
-        warned = true
-        ns.Recorder.Warn("warn1mb", bytes)
+    if bytes + Store.RESERVE > Store.FIGHT_CAP then
+        Cap(true)
+        return index
     end
-    if bytes >= SESSION_CAP and not capped then
-        capped = true
-        ns.Recorder.Warn("cap", bytes)
-        ns.Recorder.Throttle()
-        ns.Print("Лог дошёл до 1,5 МБ, запись боя дошла до предела 1,5 МБ (будет записан только итог боя)")
+    local used = dbBytes + bufBytes + Store.RESERVE
+    if used + SPARE > Store.DB_CAP and not shedJob and not shedDone then
+        shedJob = Jobs.Add("shed", Shed, true)
+    end
+    if used > Store.DB_CAP then
+        Jobs.Finish(shedJob)
+        if dbBytes + bufBytes + Store.RESERVE > Store.DB_CAP then
+            Cap()
+        end
     end
     return index
 end
@@ -222,6 +282,7 @@ end
 function Store.WriteChunk(text)
     Store.Flush()
     chunks[#chunks + 1] = text
+    ChunkRefs(text, Refs(cur))
     local size = #text + 1
     dbBytes = dbBytes + size
     bytes = bytes + size
@@ -232,7 +293,8 @@ function Store.Open(session)
     cur = session
     chunks = session.chunks
     records, bytes, dropped = 0, 0, 0
-    capped, warned = false, false
+    capped, shedDone = false, false
+    Refs(session)
     db.sessions[#db.sessions + 1] = session
     DropFights()
 end
@@ -254,6 +316,12 @@ function Store.Append(session, line)
     session.chunks[#session.chunks + 1] = line
     dbBytes = dbBytes + #line + 1
     session.bytes = (session.bytes or 0) + #line + 1
+    if sizeOf[session] then
+        sizeOf[session] = sizeOf[session] + #line + 1
+    end
+    if refsOf[session] then
+        ChunkRefs(line, refsOf[session])
+    end
 end
 
 function Store.Static(guid, text)
@@ -402,30 +470,11 @@ function Store.LastOpen()
     return nil
 end
 
-local function CleanRefs(line, used)
-    for id in line:gmatch(";[gbs]=(%d+)") do
-        used[tonumber(id)] = true
-    end
-end
-
-local function ChunkRefs(chunk, used)
-    local at = 1
-    while true do
-        local _, last = find(chunk, "STATIC;id=", at, true)
-        if not last then return end
-        local id = tonumber(match(chunk, "^%d+", last + 1))
-        if id then
-            used[id] = true
-        end
-        at = last + 1
-    end
-end
-
 local function DropUnusedStatics()
     local used = {}
     for _, session in ipairs(db.sessions) do
-        for _, chunk in ipairs(session.chunks) do
-            ChunkRefs(chunk, used)
+        for id in pairs(Refs(session)) do
+            used[id] = true
         end
     end
     for _, entry in ipairs(db.clean) do
@@ -433,8 +482,10 @@ local function DropUnusedStatics()
             CleanRefs(line, used)
         end
     end
-    for id in pairs(db.statics) do
+    local freed = 0
+    for id, static in pairs(db.statics) do
         if not used[id] then
+            freed = freed + #(static.text or "") + 1
             db.statics[id] = nil
         end
     end
@@ -443,6 +494,7 @@ local function DropUnusedStatics()
             db.staticLast[guid] = nil
         end
     end
+    return freed
 end
 
 function Store.Remove(entry)
@@ -451,9 +503,9 @@ function Store.Remove(entry)
         if session == entry then
             table.remove(db.sessions, i)
             DropFights()
-            DropUnusedStatics()
+            dbBytes = dbBytes - Size(entry) - DropUnusedStatics()
             RestartNumbering()
-            Recount()
+            shedDone = false
             return true
         end
     end
@@ -467,38 +519,31 @@ local function Removable(fight, keep)
     return true
 end
 
-local function Usage(drop)
-    local total, used = bufBytes, {}
+local function Plan(keep, spare)
+    local total = Store.DbBytes()
+    if Fits(total, spare) then return nil end
+    local count, pinned = {}, {}
     for _, session in ipairs(db.sessions) do
-        if not drop[session] then
-            total = total + Measure(session)
-            for _, chunk in ipairs(session.chunks) do
-                ChunkRefs(chunk, used)
-            end
+        for id in pairs(Refs(session)) do
+            count[id] = (count[id] or 0) + 1
         end
     end
     for _, entry in ipairs(db.clean) do
         for _, line in ipairs(entry.lines) do
-            total = total + #line + 1
-            CleanRefs(line, used)
+            CleanRefs(line, pinned)
         end
     end
-    for id, static in pairs(db.statics) do
-        if used[id] then
-            total = total + #(static.text or "") + 1
+    local function Free(id)
+        local static = db.statics[id]
+        if static and not pinned[id] then
+            total = total - #(static.text or "") - 1
         end
     end
-    for _, line in ipairs(db.mods) do
-        total = total + #line + 1
+    for id in pairs(db.statics) do
+        if not count[id] then
+            Free(id)
+        end
     end
-    for _, line in ipairs(db.errors or {}) do
-        total = total + #line + 1
-    end
-    return total
-end
-
-function Store.Evict(keep)
-    if Store.Room() then return nil end
     local list, drop, gone = Store.Fights(), {}, {}
     for index = #list, 1, -1 do
         local fight = list[index]
@@ -506,22 +551,94 @@ function Store.Evict(keep)
             gone[#gone + 1] = fight
             for _, entry in ipairs(fight.entries) do
                 drop[entry] = true
-            end
-            if Usage(drop) + Store.RESERVE <= Store.DB_CAP then
-                for i = #db.sessions, 1, -1 do
-                    if drop[db.sessions[i]] then
-                        table.remove(db.sessions, i)
+                total = total - Size(entry)
+                for id in pairs(Refs(entry)) do
+                    count[id] = count[id] - 1
+                    if count[id] == 0 then
+                        Free(id)
                     end
                 end
-                DropFights()
-                DropUnusedStatics()
-                RestartNumbering()
-                Recount()
-                return gone
+            end
+            if Fits(total, spare) then
+                return drop, gone, total
             end
         end
     end
     return nil
+end
+
+local function Drop(drop, total)
+    local kept = {}
+    for _, session in ipairs(db.sessions) do
+        if not drop[session] then
+            kept[#kept + 1] = session
+        end
+    end
+    db.sessions = kept
+    DropFights()
+    DropUnusedStatics()
+    RestartNumbering()
+    dbBytes = total - bufBytes
+end
+
+local function Keep()
+    return keepOf and keepOf() or {}
+end
+
+function Store.Full()
+    return not Store.Room() and not Plan(Keep(), 0)
+end
+
+local function WarmRefs(session)
+    if refsOf[session] then return end
+    local refs = {}
+    for i, chunk in ipairs(session.chunks) do
+        ChunkRefs(chunk, refs)
+        if i % WARM_CHUNKS == 0 then
+            Jobs.Yield()
+        end
+    end
+    refsOf[session] = refsOf[session] or refs
+end
+
+function Store.Warm()
+    for _, session in ipairs(db.sessions) do
+        WarmRefs(session)
+        if session ~= cur then
+            Size(session)
+        end
+        Jobs.Yield()
+    end
+end
+
+function Store.Evict(spare)
+    local drop, gone, total = Plan(Keep(), spare or 0)
+    if not drop then return nil end
+    Drop(drop, total)
+    if onEvict then
+        onEvict(gone)
+    end
+    return gone
+end
+
+Shed = function()
+    Store.Warm()
+    shedJob = nil
+    if not cur or capped then return end
+    if not (Store.Evict(SPARE) or Store.Evict(0)) then
+        shedDone = true
+    end
+end
+
+Cap = function(fight)
+    capped = true
+    ns.Recorder.Warn("cap", bytes)
+    ns.Recorder.Throttle()
+    if fight then
+        ns.Print(("запись боя дошла до предела %d МБ, дальше в этом бою записывается только итог"):format(floor(Store.FIGHT_CAP / 1048576)))
+    else
+        ns.Print("место для логов закончилось, дальше в этом бою записывается только итог. Отправьте файл на upload.sirusmythic.ru и нажмите «Очистить всё» в /sml")
+    end
 end
 
 function Store.Reset()
@@ -534,6 +651,7 @@ function Store.Reset()
     db.errors = nil
     db.clean = {}
     dbBytes = 0
+    shedDone = false
     RestartNumbering()
     return true
 end
@@ -580,7 +698,6 @@ function Store.AddClean(line, info)
         gone[id] = nil
     end
     if next(gone) then
-        DropUnusedStatics()
-        Recount()
+        dbBytes = dbBytes - DropUnusedStatics()
     end
 end
