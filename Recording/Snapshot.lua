@@ -87,7 +87,7 @@ local function WriteIdentity(w)
     local client, build = GetBuildInfo()
     w:Line("SNAPSHOT", "addon", addonName, "version", ns.VERSION, "format", ns.FORMAT,
         "time", date("%Y-%m-%d %H:%M:%S"), "client", client, "clientBuild", build, "realm", GetRealmName(),
-        "calm", changedAt > 0 and ns.MsSince(changedAt) or nil)
+        "calm", changedAt > 0 and ns.MsSince(changedAt) or nil, "flight", UnitOnTaxi("player") and 1 or nil)
 
     local guid, guidHex = ParseGuid(UnitGUID("player"))
     local race, raceToken, raceId = UnitRace("player")
@@ -1021,7 +1021,7 @@ end
 
 local NumberText, InCombat = ns.NumberText, ns.InCombat
 local select, tostring, tonumber, max, gmatch, byte = select, tostring, tonumber, math.max, string.gmatch, string.byte
-local GetTime, UnitAura = GetTime, UnitAura
+local GetTime, UnitAura, UnitOnTaxi = GetTime, UnitAura, UnitOnTaxi
 local ENCHANT_TIME = ns.ENCHANT_TIME
 
 local QUIET = 2
@@ -1136,6 +1136,7 @@ end
 local function Refusal(scan)
     if Store.Full() then return "full" end
     if UnitIsDeadOrGhost("player") then return "dead" end
+    if UnitOnTaxi("player") then return "flight" end
     local clean, aura = ScanAuras("HELPFUL", scan)
     if clean then
         clean, aura = ScanAuras("HARMFUL", scan)
@@ -1262,6 +1263,9 @@ local function Body(scan, guid, dead)
         Put(out, key, Join(UnitStat("player", stat)))
     end
     Put(out, "hp", UnitHealthMax("player"))
+    if not dead then
+        Put(out, "hpcur", UnitHealth("player"))
+    end
     Put(out, "mp", mana > 0 and mana or nil)
     Put(out, "arm", Join(UnitArmor("player")))
     Put(out, "def", Join(UnitDefense("player")))
@@ -1295,6 +1299,7 @@ local function Body(scan, guid, dead)
 end
 
 local function Settled(text)
+    text = gsub(text, ";hpcur=[^;]*", "")
     return (gsub(text, ";([pn]a=)([^;]*)", function(field, list)
         local kept = {}
         for token in gmatch(list, "[^,]+") do
@@ -1463,6 +1468,7 @@ local UNIT_TRIGGERS = { "UNIT_AURA", "UNIT_STATS", "UNIT_INVENTORY_CHANGED" }
 local TRIGGERS = {
     "PLAYER_EQUIPMENT_CHANGED", "CHARACTER_POINTS_CHANGED", "PLAYER_TALENT_UPDATE", "GLYPH_ADDED", "GLYPH_REMOVED",
     "GLYPH_UPDATED", "PLAYER_LEVEL_UP", "UPDATE_SHAPESHIFT_FORM", "SPELLS_CHANGED", "SKILL_LINES_CHANGED",
+    "PLAYER_CONTROL_GAINED",
 }
 
 local function Listen(on)
@@ -1535,6 +1541,8 @@ end
 function frame:UPDATE_SHAPESHIFT_FORM()
     Touch(QUIET)
 end
+
+frame.PLAYER_CONTROL_GAINED = frame.UPDATE_SHAPESHIFT_FORM
 
 function frame:SPELLS_CHANGED()
     bookStale = true

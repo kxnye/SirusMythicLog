@@ -1,8 +1,8 @@
 local addonName, ns = ...
 
-ns.VERSION = "1.0.3"
+ns.VERSION = "1.0.4"
 ns.FORMAT = 6
-ns.SCHEMA = 9
+ns.SCHEMA = 10
 
 local floor, format, gsub, match = math.floor, string.format, string.gsub, string.match
 local concat = table.concat
