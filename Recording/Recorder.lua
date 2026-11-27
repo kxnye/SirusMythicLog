@@ -10,7 +10,7 @@ local Escape, NumberText, KV = ns.Escape, ns.NumberText, ns.KV
 local Write = Store.Write
 local format, floor, select, tostring, next = string.format, math.floor, select, tostring, next
 local concat = table.concat
-local pcall, debugprofilestop, GetTime, UnitAura = pcall, debugprofilestop, GetTime, UnitAura
+local pcall, debugprofilestop, GetTime, UnitAura, UnitOnTaxi = pcall, debugprofilestop, GetTime, UnitAura, UnitOnTaxi
 
 local ERROR_CAP = 20
 local UNKNOWN_CAP = 512
@@ -134,6 +134,10 @@ for stat, name in ipairs(D.STAT_KEY) do
         return effective
     end)
 end
+Field("arm", function()
+    local _, effective = UnitArmor("player")
+    return effective
+end)
 Field("mmax", function()
     return UnitPowerMax("player", 0)
 end)
@@ -404,6 +408,19 @@ local sampling = false
 local speed, lastTick
 local ticks, encounterTicks = 0, 0
 
+local flight = false
+
+local function CheckFlight(t)
+    local now = UnitOnTaxi ~= nil and UnitOnTaxi("player") ~= nil
+    if now == flight then return end
+    flight = now
+    Write(format("W;%d;flight;%d", t, now and 1 or 0))
+end
+
+local function OnControl()
+    CheckFlight(Now())
+end
+
 local function WriteSpeed(t)
     local current = floor(GetUnitSpeed("player") * 100 + 0.5) / 100
     if current ~= speed then
@@ -461,6 +478,7 @@ local function Tick()
         encounterTicks = encounterTicks + 1
     end
     WriteSpeed(t)
+    CheckFlight(t)
     ns.ClassState.Poll(t)
     if won then
         ns.Session.BossWon(t)
@@ -894,6 +912,7 @@ local UNIT_HANDLERS = {
     UNIT_ATTACK_SPEED = OnStats,
     UNIT_RANGEDDAMAGE = OnStats,
     UNIT_MAXMANA = OnStats,
+    UNIT_RESISTANCES = OnStats,
 }
 
 local EVENT_HANDLERS = {
@@ -903,6 +922,8 @@ local EVENT_HANDLERS = {
     UPDATE_SHAPESHIFT_FORM = OnStats,
     SPELL_UPDATE_COOLDOWN = OnCooldown,
     UNIT_FACTION = OnFaction,
+    PLAYER_CONTROL_LOST = OnControl,
+    PLAYER_CONTROL_GAINED = OnControl,
 }
 for event in pairs(CHAT_KIND) do
     EVENT_HANDLERS[event] = function(text, sender)
@@ -917,11 +938,11 @@ local CAST_EVENTS = {
 }
 local STAT_EVENTS = {
     "UNIT_STATS", "UNIT_ATTACK_POWER", "UNIT_RANGED_ATTACK_POWER", "UNIT_ATTACK_SPEED", "UNIT_RANGEDDAMAGE",
-    "UNIT_MAXMANA",
+    "UNIT_MAXMANA", "UNIT_RESISTANCES",
 }
 local PLAYER_EVENTS = {
     "PLAYER_TARGET_CHANGED", "COMBAT_RATING_UPDATE", "PLAYER_DAMAGE_DONE_MODS", "UPDATE_SHAPESHIFT_FORM",
-    "SPELL_UPDATE_COOLDOWN",
+    "SPELL_UPDATE_COOLDOWN", "PLAYER_CONTROL_LOST", "PLAYER_CONTROL_GAINED",
 }
 
 frame:SetScript("OnEvent", function(self, event, unit, ...)
@@ -999,6 +1020,8 @@ function Recorder.Begin(mode, list, links)
     Try("begin", ScanAuras, playerAuras, t)
     Try("begin", ScanAuras, targetAuras, t)
     Try("begin", SampleStats, t)
+    flight = false
+    Try("begin", CheckFlight, t)
     Try("begin", OnCooldown)
     Try("begin", ns.ClassState.Begin, t, links)
     Try("begin", ns.Pet.Begin, t)
